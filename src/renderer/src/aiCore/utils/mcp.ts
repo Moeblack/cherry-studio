@@ -9,14 +9,17 @@ import type { JSONSchema7 } from 'json-schema'
 const logger = loggerService.withContext('MCP-utils')
 
 // Setup tools configuration based on provided parameters
-export function setupToolsConfig(mcpTools?: MCPTool[]): Record<string, Tool<any, any>> | undefined {
+export function setupToolsConfig(
+  mcpTools?: MCPTool[],
+  sendMcpToolImages?: boolean
+): Record<string, Tool<any, any>> | undefined {
   let tools: ToolSet = {}
 
   if (!mcpTools?.length) {
     return undefined
   }
 
-  tools = convertMcpToolsToAiSdkTools(mcpTools)
+  tools = convertMcpToolsToAiSdkTools(mcpTools, sendMcpToolImages)
 
   return tools
 }
@@ -128,8 +131,12 @@ function mcpResultToTextSummary(result: MCPCallToolResponse): string {
 
 /**
  * 将 MCPTool 转换为 AI SDK 工具格式
+ *
+ * @param sendMcpToolImages - 是否将 MCP 工具返回的图片/音频发送给模型。
+ *   true: 返回 content + media 格式（Gemini 等支持 inlineData 的 provider 能"看见"图片）
+ *   false (默认): 返回纯文本摘要，避免 OpenAI 兼容格式超出消息大小限制
  */
-export function convertMcpToolsToAiSdkTools(mcpTools: MCPTool[]): ToolSet {
+export function convertMcpToolsToAiSdkTools(mcpTools: MCPTool[], sendMcpToolImages?: boolean): ToolSet {
   const tools: ToolSet = {}
 
   for (const mcpTool of mcpTools) {
@@ -188,32 +195,35 @@ export function convertMcpToolsToAiSdkTools(mcpTools: MCPTool[]): ToolSet {
       },
       // 将 MCP 多模态结果（image/audio）转为 AI SDK 可理解的格式
       //
-      // @ai-sdk/google (Gemini): "content" + "media" → inlineData，模型能看见图片
-      // @ai-sdk/openai-compatible: "content" → JSON.stringify(value)，大图 base64 会超限
+      // sendMcpToolImages === true:
+      //   返回 content + media 格式（@ai-sdk/google 会将 media → inlineData，模型能看见图片）
+      //   注意：OpenAI 兼容 provider 会 JSON.stringify → 大图 base64 可能超限，用户需自行承担风险
       //
-      // 策略：优先尝试 content 格式（Gemini 受益），如果不含多模态则返回纯文本摘要
-      // 对于 OpenAI 兼容 provider，JSON.stringify media 虽然不理想但图片数据已通过
-      // IMAGE_COMPLETE 展示给用户，模型端只需知道"工具返回了图片"即可
+      // sendMcpToolImages === false (默认):
+      //   返回纯文本摘要，安全兼容所有 provider
       //
       // 注意：AI SDK 直接传 output 值本身（不是 { output: xxx } 包装），参见 ai.js createToolModelOutput
       toModelOutput(rawOutput: unknown) {
         const result = rawOutput as MCPCallToolResponse
 
-        // 尝试转为 content 格式（Gemini 能正确处理 media → inlineData）
-        const converted = mcpResultToModelOutput(result)
-        if (converted) {
-          // 检查 content 中是否有 media 部分
-          // 如果有，同时提供纯文本摘要作为 fallback
-          // @ai-sdk/openai-compatible 会 JSON.stringify content.value，
-          // 其中 media 的 data 字段会被序列化为巨大字符串
-          // 为避免超限，返回纯文本摘要（对 Gemini 不够理想但安全）
-          //
-          // TODO: 等 AI SDK 提供 provider 感知能力后，可以按 provider 分别处理
-          // 目前先用文本摘要保证所有 provider 都不会超限
-          return { type: 'text' as const, value: mcpResultToTextSummary(result) }
+        if (sendMcpToolImages) {
+          // 用户开启了"发送图片给模型"，尝试转为 content + media 格式
+          const converted = mcpResultToModelOutput(result)
+          if (converted) {
+            return converted
+          }
+        } else {
+          // 默认：如果有多模态内容，返回纯文本摘要（避免 base64 超限）
+          const hasMultimodal =
+            result?.content && Array.isArray(result.content)
+              ? result.content.some((item) => item.type === 'image' || item.type === 'audio')
+              : false
+          if (hasMultimodal) {
+            return { type: 'text' as const, value: mcpResultToTextSummary(result) }
+          }
         }
 
-        // 无多模态内容时，走默认的 JSON 序列化
+        // 无多模态内容 或 sendMcpToolImages 开启但转换失败，走默认的 JSON 序列化
         return { type: 'text' as const, value: JSON.stringify(result) }
       }
     })

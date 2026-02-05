@@ -130,7 +130,7 @@ export async function buildStreamTextParams(
 
   const enableGenerateImage = !!(isGenerateImageModel(model) && assistant.enableGenerateImage)
 
-  let tools = setupToolsConfig(mcpTools)
+  let tools = setupToolsConfig(mcpTools, assistant.sendMcpToolImages)
 
   // 构建真正的 providerOptions
   const webSearchConfig: CherryWebSearchConfig = {
