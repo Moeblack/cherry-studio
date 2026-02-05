@@ -49,6 +49,8 @@ export type Assistant = {
   // enableUrlContext 是 Gemini/Anthropic 的特有功能
   enableUrlContext?: boolean
   enableGenerateImage?: boolean
+  /** Whether to send MCP tool images/audio to the model (default: false, only send text description) */
+  sendMcpToolImages?: boolean
   /** MCP mode: 'disabled' (no MCP), 'auto' (hub server only), 'manual' (user selects servers) */
   mcpMode?: McpMode
   mcpServers?: MCPServer[]

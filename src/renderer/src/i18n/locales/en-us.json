@@ -761,6 +761,11 @@
       "file_not_supported_count": "{{count}} files are not supported",
       "generate_image": "Generate image",
       "generate_image_not_supported": "The model does not support generating images.",
+      "send_tool_images": {
+        "label": "Send tool images to model",
+        "enabled": "Tool images will be sent to model (may exceed size limits on some providers)",
+        "disabled": "Tool images will not be sent to model (only text description)"
+      },
       "knowledge_base": "Knowledge Base",
       "new": {
         "context": "Clear Context {{Command}}"
