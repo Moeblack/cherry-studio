@@ -43,6 +43,7 @@ class BackupManager {
 
   // Streaming data writer for large backups
   private dataWriteStream: fs.WriteStream | null = null
+  private _streamingSkipBackupFile: boolean = false
 
   // 缓存核心连接配置，用于检测连接配置是否变更
   private cachedS3ConnectionConfig: {
@@ -220,30 +221,21 @@ class BackupManager {
    * "Invalid string length" errors with large datasets.
    */
   async createDataWriter(_: Electron.IpcMainInvokeEvent, skipBackupFile: boolean): Promise<void> {
-    // Clean up any existing writer
+    // Clean up any previous state
     if (this.dataWriteStream) {
       this.dataWriteStream.destroy()
       this.dataWriteStream = null
     }
+    // Clean up any leftover temp directory from a previous failed attempt
+    await fs.remove(this.tempDir).catch(() => {})
 
     await fs.ensureDir(this.tempDir)
 
     const tempDataPath = path.join(this.tempDir, 'data.json')
     this.dataWriteStream = fs.createWriteStream(tempDataPath)
 
-    if (!skipBackupFile) {
-      // Pre-copy Data directory while renderer is still sending chunks
-      const sourcePath = path.join(app.getPath('userData'), 'Data')
-      if (await fs.pathExists(sourcePath)) {
-        const tempDataDir = path.join(this.tempDir, 'Data')
-        await this.copyDirWithProgress(sourcePath, tempDataDir, () => {})
-        await this.setWritableRecursive(tempDataDir)
-      } else {
-        await fs.promises.mkdir(path.join(this.tempDir, 'Data'), { recursive: true })
-      }
-    } else {
-      await fs.promises.mkdir(path.join(this.tempDir, 'Data'), { recursive: true })
-    }
+    // Store skipBackupFile for later use during compression
+    this._streamingSkipBackupFile = skipBackupFile
 
     logger.debug('[BackupManager] Data writer created for streaming backup')
   }
@@ -398,6 +390,25 @@ class BackupManager {
     }
 
     try {
+      // Ensure Data directory exists in tempDir (needed for streaming mode
+      // where createDataWriter defers Data dir preparation to here)
+      const tempDataDir = path.join(this.tempDir, 'Data')
+      if (!(await fs.pathExists(tempDataDir))) {
+        if (!this._streamingSkipBackupFile) {
+          const sourcePath = path.join(app.getPath('userData'), 'Data')
+          if (await fs.pathExists(sourcePath)) {
+            onProgress({ stage: 'copying_files', progress: 30, total: 100 })
+            await this.copyDirWithProgress(sourcePath, tempDataDir, () => {})
+            await this.setWritableRecursive(tempDataDir)
+          } else {
+            await fs.promises.mkdir(tempDataDir, { recursive: true })
+          }
+        } else {
+          await fs.promises.mkdir(tempDataDir, { recursive: true })
+        }
+      }
+
+      onProgress({ stage: 'preparing_compression', progress: 50, total: 100 })
       await fs.ensureDir(destinationPath)
 
       // 创建输出文件流
