@@ -41,6 +41,9 @@ class BackupManager {
   private s3Storage: S3Storage | null = null
   private webdavInstance: WebDav | null = null
 
+  // Streaming data writer for large backups
+  private dataWriteStream: fs.WriteStream | null = null
+
   // 缓存核心连接配置，用于检测连接配置是否变更
   private cachedS3ConnectionConfig: {
     endpoint: string
@@ -75,6 +78,10 @@ class BackupManager {
     this.listS3Files = this.listS3Files.bind(this)
     this.deleteS3File = this.deleteS3File.bind(this)
     this.checkS3Connection = this.checkS3Connection.bind(this)
+    this.createDataWriter = this.createDataWriter.bind(this)
+    this.writeDataChunk = this.writeDataChunk.bind(this)
+    this.closeDataWriter = this.closeDataWriter.bind(this)
+    this.backupFromStream = this.backupFromStream.bind(this)
   }
 
   private async setWritableRecursive(dirPath: string): Promise<void> {
@@ -206,6 +213,92 @@ class BackupManager {
     return this.webdavInstance
   }
 
+  /**
+   * Create a streaming data writer for large backups.
+   * This allows the renderer process to send data in chunks via IPC,
+   * avoiding the V8 string length limit (~512MB) that causes
+   * "Invalid string length" errors with large datasets.
+   */
+  async createDataWriter(_: Electron.IpcMainInvokeEvent, skipBackupFile: boolean): Promise<void> {
+    // Clean up any existing writer
+    if (this.dataWriteStream) {
+      this.dataWriteStream.destroy()
+      this.dataWriteStream = null
+    }
+
+    await fs.ensureDir(this.tempDir)
+
+    const tempDataPath = path.join(this.tempDir, 'data.json')
+    this.dataWriteStream = fs.createWriteStream(tempDataPath)
+
+    if (!skipBackupFile) {
+      // Pre-copy Data directory while renderer is still sending chunks
+      const sourcePath = path.join(app.getPath('userData'), 'Data')
+      if (await fs.pathExists(sourcePath)) {
+        const tempDataDir = path.join(this.tempDir, 'Data')
+        await this.copyDirWithProgress(sourcePath, tempDataDir, () => {})
+        await this.setWritableRecursive(tempDataDir)
+      } else {
+        await fs.promises.mkdir(path.join(this.tempDir, 'Data'), { recursive: true })
+      }
+    } else {
+      await fs.promises.mkdir(path.join(this.tempDir, 'Data'), { recursive: true })
+    }
+
+    logger.debug('[BackupManager] Data writer created for streaming backup')
+  }
+
+  /**
+   * Write a chunk of data to the streaming backup file.
+   */
+  async writeDataChunk(_: Electron.IpcMainInvokeEvent, chunk: string): Promise<void> {
+    if (!this.dataWriteStream) {
+      throw new Error('Data writer not initialized. Call createDataWriter first.')
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const canContinue = this.dataWriteStream!.write(chunk)
+      if (canContinue) {
+        resolve()
+      } else {
+        // Wait for drain event when buffer is full (backpressure)
+        this.dataWriteStream!.once('drain', resolve)
+        this.dataWriteStream!.once('error', reject)
+      }
+    })
+  }
+
+  /**
+   * Close the streaming data writer and finalize the data.json file.
+   */
+  async closeDataWriter(_?: Electron.IpcMainInvokeEvent): Promise<void> {
+    if (!this.dataWriteStream) {
+      throw new Error('Data writer not initialized.')
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      this.dataWriteStream!.end()
+      this.dataWriteStream!.on('finish', () => resolve())
+      this.dataWriteStream!.on('error', (error) => reject(error))
+    })
+
+    this.dataWriteStream = null
+    logger.debug('[BackupManager] Data writer closed, data.json finalized')
+  }
+
+  /**
+   * Create a backup ZIP from the already-written streaming data.
+   * Called after createDataWriter + writeDataChunk + closeDataWriter sequence.
+   * data.json and Data/ directory are already in tempDir.
+   */
+  async backupFromStream(
+    _: Electron.IpcMainInvokeEvent,
+    fileName: string,
+    destinationPath: string = this.backupDir
+  ): Promise<string> {
+    return this._compressAndFinalize(_, fileName, destinationPath)
+  }
+
   async backup(
     _: Electron.IpcMainInvokeEvent,
     fileName: string,
@@ -228,44 +321,84 @@ class BackupManager {
       await fs.ensureDir(this.tempDir)
       onProgress({ stage: 'preparing', progress: 0, total: 100 })
 
-      // 使用流的方式写入 data.json
       const tempDataPath = path.join(this.tempDir, 'data.json')
+      const dataJsonExists = await fs.pathExists(tempDataPath)
 
-      await new Promise<void>((resolve, reject) => {
-        const writeStream = fs.createWriteStream(tempDataPath)
-        writeStream.write(data)
-        writeStream.end()
+      if (data) {
+        // Legacy path: write the entire data string to data.json at once
+        await new Promise<void>((resolve, reject) => {
+          const writeStream = fs.createWriteStream(tempDataPath)
+          writeStream.write(data)
+          writeStream.end()
 
-        writeStream.on('finish', () => resolve())
-        writeStream.on('error', (error) => reject(error))
-      })
+          writeStream.on('finish', () => resolve())
+          writeStream.on('error', (error) => reject(error))
+        })
+      } else if (!dataJsonExists) {
+        throw new Error('No data provided and data.json not found. Call streamBackupData() first.')
+      }
+      // else: data.json already written by streaming (createDataWriter + writeDataChunk + closeDataWriter)
 
+      const isStreamingMode = !data && dataJsonExists
       onProgress({ stage: 'writing_data', progress: 20, total: 100 })
 
-      logger.debug(`BackupManager IPC, skipBackupFile: ${skipBackupFile}`)
+      logger.debug(`BackupManager IPC, skipBackupFile: ${skipBackupFile}, streamingMode: ${isStreamingMode}`)
 
-      if (!skipBackupFile) {
-        // 复制 Data 目录到临时目录
-        const sourcePath = path.join(app.getPath('userData'), 'Data')
-        const tempDataDir = path.join(this.tempDir, 'Data')
+      // In streaming mode, Data directory is already prepared by createDataWriter
+      if (!isStreamingMode) {
+        if (!skipBackupFile) {
+          // 复制 Data 目录到临时目录
+          const sourcePath = path.join(app.getPath('userData'), 'Data')
+          const tempDataDir = path.join(this.tempDir, 'Data')
 
-        // 获取源目录总大小
-        const totalSize = await this.getDirSize(sourcePath)
-        let copiedSize = 0
+          // 获取源目录总大小
+          const totalSize = await this.getDirSize(sourcePath)
+          let copiedSize = 0
 
-        // 使用流式复制
-        await this.copyDirWithProgress(sourcePath, tempDataDir, (size) => {
-          copiedSize += size
-          const progress = Math.min(50, Math.floor((copiedSize / totalSize) * 50))
-          onProgress({ stage: 'copying_files', progress, total: 100 })
-        })
+          // 使用流式复制
+          await this.copyDirWithProgress(sourcePath, tempDataDir, (size) => {
+            copiedSize += size
+            const progress = Math.min(50, Math.floor((copiedSize / totalSize) * 50))
+            onProgress({ stage: 'copying_files', progress, total: 100 })
+          })
 
-        await this.setWritableRecursive(tempDataDir)
-        onProgress({ stage: 'preparing_compression', progress: 50, total: 100 })
-      } else {
-        logger.debug('Skip the backup of the file')
-        await fs.promises.mkdir(path.join(this.tempDir, 'Data')) // 不创建空 Data 目录会导致 restore 失败
+          await this.setWritableRecursive(tempDataDir)
+          onProgress({ stage: 'preparing_compression', progress: 50, total: 100 })
+        } else {
+          logger.debug('Skip the backup of the file')
+          await fs.promises.mkdir(path.join(this.tempDir, 'Data')) // 不创建空 Data 目录会导致 restore 失败
+        }
       }
+
+      return await this._compressAndFinalize(_, fileName, destinationPath)
+    } catch (error) {
+      logger.error('[BackupManager] Backup failed:', error as Error)
+      // 确保清理临时目录
+      await fs.remove(this.tempDir).catch(() => {})
+      throw error
+    }
+  }
+
+  /**
+   * Shared compression and finalization logic for both legacy backup() and streaming backupFromStream().
+   * Expects tempDir to already contain data.json and Data/ directory.
+   */
+  private async _compressAndFinalize(
+    _: Electron.IpcMainInvokeEvent,
+    fileName: string,
+    destinationPath: string = this.backupDir
+  ): Promise<string> {
+    const mainWindow = windowService.getMainWindow()
+
+    const onProgress = (processData: { stage: string; progress: number; total: number }) => {
+      mainWindow?.webContents.send(IpcChannel.BackupProgress, processData)
+      if (processData.stage === 'completed' || processData.progress === 100) {
+        logger.debug('backup progress', processData)
+      }
+    }
+
+    try {
+      await fs.ensureDir(destinationPath)
 
       // 创建输出文件流
       const backupedFilePath = path.join(destinationPath, fileName)
@@ -359,8 +492,7 @@ class BackupManager {
       logger.debug('Backup completed successfully')
       return backupedFilePath
     } catch (error) {
-      logger.error('[BackupManager] Backup failed:', error as Error)
-      // 确保清理临时目录
+      logger.error('[BackupManager] Compress failed:', error as Error)
       await fs.remove(this.tempDir).catch(() => {})
       throw error
     }

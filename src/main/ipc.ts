@@ -590,6 +590,10 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Backup_CheckS3Connection, backupManager.checkS3Connection.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_CreateLanTransferBackup, backupManager.createLanTransferBackup.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_DeleteTempBackup, backupManager.deleteTempBackup.bind(backupManager))
+  ipcMain.handle(IpcChannel.Backup_CreateDataWriter, backupManager.createDataWriter.bind(backupManager))
+  ipcMain.handle(IpcChannel.Backup_WriteDataChunk, backupManager.writeDataChunk.bind(backupManager))
+  ipcMain.handle(IpcChannel.Backup_CloseDataWriter, backupManager.closeDataWriter.bind(backupManager))
+  ipcMain.handle(IpcChannel.Backup_BackupFromStream, backupManager.backupFromStream.bind(backupManager))
 
   // file
   ipcMain.handle(IpcChannel.File_Open, fileManager.open.bind(fileManager))

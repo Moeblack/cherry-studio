@@ -64,10 +64,10 @@ async function deleteWebdavFileWithRetry(fileName: string, webdavConfig: WebDavC
 
 export async function backup(skipBackupFile: boolean) {
   const filename = `cherry-studio.${dayjs().format('YYYYMMDDHHmm')}.zip`
-  const fileContnet = await getBackupData()
   const selectFolder = await window.api.file.selectFolder()
   if (selectFolder) {
-    await window.api.backup.backup(filename, fileContnet, selectFolder, skipBackupFile)
+    await streamBackupData(skipBackupFile)
+    await window.api.backup.backupFromStream(filename, selectFolder)
     window.toast.success(i18n.t('message.backup.success'))
   }
 }
@@ -181,11 +181,13 @@ export async function backupToWebdav({
   const timestamp = dayjs().format('YYYYMMDDHHmmss')
   const backupFileName = customFileName || `cherry-studio.${timestamp}.${hostname}.${deviceType}.zip`
   const finalFileName = backupFileName.endsWith('.zip') ? backupFileName : `${backupFileName}.zip`
-  const backupData = await getBackupData()
+
+  // Stream backup data to main process first, then pass empty string to skip legacy data transfer
+  await streamBackupData(webdavSkipBackupFile)
 
   // 上传文件
   try {
-    const success = await window.api.backup.backupToWebdav(backupData, {
+    const success = await window.api.backup.backupToWebdav('', {
       webdavHost,
       webdavUser,
       webdavPass,
@@ -355,10 +357,12 @@ export async function backupToS3({
   const timestamp = dayjs().format('YYYYMMDDHHmmss')
   const backupFileName = customFileName || `cherry-studio.${timestamp}.${hostname}.${deviceType}.zip`
   const finalFileName = backupFileName.endsWith('.zip') ? backupFileName : `${backupFileName}.zip`
-  const backupData = await getBackupData()
+
+  // Stream backup data to main process first
+  await streamBackupData(s3Config.skipBackupFile || false)
 
   try {
-    const success = await window.api.backup.backupToS3(backupData, {
+    const success = await window.api.backup.backupToS3('', {
       ...s3Config,
       fileName: finalFileName
     })
@@ -820,6 +824,10 @@ export function stopAutoSync(type?: BackupType) {
   }
 }
 
+/**
+ * @deprecated Use streamBackupData() for large datasets to avoid V8 "Invalid string length" errors.
+ * Kept for compatibility with LAN transfer and other paths that still need the data as a string.
+ */
 export async function getBackupData() {
   return JSON.stringify({
     time: new Date().getTime(),
@@ -827,6 +835,81 @@ export async function getBackupData() {
     localStorage,
     indexedDB: await backupDatabase()
   })
+}
+
+/**
+ * Stream backup data to the main process in chunks via IPC.
+ * This avoids building a single giant JSON string in the renderer process,
+ * which would hit V8's ~512MB string length limit for users with large datasets
+ * (e.g., a year's worth of chat history).
+ *
+ * The resulting data.json is format-identical to getBackupData(), so restore
+ * works without any changes.
+ *
+ * @param skipBackupFile - Whether to skip backing up the Data directory
+ */
+export async function streamBackupData(skipBackupFile: boolean) {
+  const BATCH_SIZE = 500 // records per chunk — balances IPC overhead vs memory
+
+  // 1. Tell main process to create data.json write stream and prepare Data/ dir
+  await window.api.backup.createDataWriter(skipBackupFile)
+
+  try {
+    // 2. Write the JSON opening + fixed fields
+    const header = JSON.stringify({
+      time: new Date().getTime(),
+      version: 5,
+      localStorage
+    })
+    // Replace the closing "}" with ',"indexedDB":{' to start the indexedDB object
+    await window.api.backup.writeDataChunk(header.slice(0, -1) + ',"indexedDB":{')
+
+    // 3. Stream each IndexedDB table
+    const tables = db.tables
+    for (let tableIdx = 0; tableIdx < tables.length; tableIdx++) {
+      const table = tables[tableIdx]
+      const tableName = table.name
+
+      // Write table key
+      const prefix = tableIdx === 0 ? '' : ','
+      await window.api.backup.writeDataChunk(prefix + JSON.stringify(tableName) + ':[')
+
+      // Stream records in batches to avoid creating a huge array in memory
+      const totalCount = await table.count()
+      let offset = 0
+      let isFirstBatch = true
+
+      while (offset < totalCount) {
+        const batch = await table.offset(offset).limit(BATCH_SIZE).toArray()
+        if (batch.length === 0) break
+
+        // Serialize each record individually and join with commas
+        const separator = isFirstBatch ? '' : ','
+        const jsonChunk = separator + batch.map((record) => JSON.stringify(record)).join(',')
+        await window.api.backup.writeDataChunk(jsonChunk)
+
+        isFirstBatch = false
+        offset += batch.length
+      }
+
+      // Close the table array
+      await window.api.backup.writeDataChunk(']')
+    }
+
+    // 4. Close indexedDB object and root object
+    await window.api.backup.writeDataChunk('}}')
+
+    // 5. Finalize the write stream
+    await window.api.backup.closeDataWriter()
+  } catch (error) {
+    // Attempt to close the writer to clean up resources
+    try {
+      await window.api.backup.closeDataWriter()
+    } catch {
+      // ignore cleanup errors
+    }
+    throw error
+  }
 }
 
 /************************************* Backup Utils ************************************** */
@@ -953,10 +1036,12 @@ export async function backupToLocal({
   const timestamp = dayjs().format('YYYYMMDDHHmmss')
   const backupFileName = customFileName || `cherry-studio.${timestamp}.${hostname}.${deviceType}.zip`
   const finalFileName = backupFileName.endsWith('.zip') ? backupFileName : `${backupFileName}.zip`
-  const backupData = await getBackupData()
+
+  // Stream backup data to main process first
+  await streamBackupData(localBackupSkipBackupFile)
 
   try {
-    const result = await window.api.backup.backupToLocalDir(backupData, finalFileName, {
+    const result = await window.api.backup.backupToLocalDir('', finalFileName, {
       localBackupDir,
       skipBackupFile: localBackupSkipBackupFile
     })
