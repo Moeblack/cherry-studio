@@ -1,0 +1,10 @@
+perf: fix memory bloat and IPC over-serialization with large tool responses
+
+- Strip redundant base64 image data from tool response before ToolBlock
+  storage (ImageBlock already holds the data independently)
+- Exclude messages/messageBlocks from IPC state sync to main process
+  (these slices are never read by main process and were causing
+  200-500ms serialization blocking every 100ms)
+
+Measured: JS heap reduced from 1,077 MB to 341 MB (-68%), UI freezes
+eliminated. See upstream PR CherryHQ/cherry-studio#12766.

@@ -1,0 +1,26 @@
+fix: use streaming backup to prevent "Invalid string length" for large datasets
+
+Users with large databases (e.g., a year of chat history) hit V8's ~512MB
+string length limit when JSON.stringify() is called on the entire IndexedDB
+in getBackupData(). This causes "Invalid string length" errors even with
+the simplified backup option enabled.
+
+Replace the single-shot JSON.stringify + IPC transfer with a streaming
+approach: the renderer reads IndexedDB tables in batches (500 records),
+serializes each batch individually, and streams chunks to the main process
+via multiple small IPC calls. The main process writes chunks directly to
+a file stream, never holding the entire dataset in memory.
+
+Key changes:
+- Add streaming IPC channels: createDataWriter, writeDataChunk,
+  closeDataWriter, backupFromStream
+- New streamBackupData() in BackupService that writes data.json
+  incrementally via IPC chunked writes
+- BackupManager gains streaming writer methods with backpressure support
+- Extract _compressAndFinalize() to share ZIP logic between legacy and
+  streaming paths
+- Migrate all backup paths (local, WebDAV, S3, Nutstore, LAN transfer)
+  to use streaming
+- data.json format is unchanged — restore needs zero modifications
+
+Fixes CherryHQ/cherry-studio#11862

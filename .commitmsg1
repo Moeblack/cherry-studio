@@ -1,0 +1,13 @@
+fix: strip redundant base64 image data from tool response before storage
+
+When MCP tools return images, the base64 data was stored in both the
+ToolBlock (rawMcpToolResponse.response) and the ImageBlock
+(generateImageResponse). Over multiple tool calls this caused JS heap
+to balloon — measured at 924 MB of strings (84% of heap) in a session
+with ~125 generated images.
+
+Extract images before emitting MCP_TOOL_COMPLETE and replace the heavy
+base64 payload in the tool response with a lightweight placeholder.
+The ImageBlock continues to hold the actual image data for display.
+The ToolBlock UI (extractPreviewContent) only reads content.mimeType,
+never content.data, so display is unaffected.

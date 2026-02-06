@@ -1,0 +1,14 @@
+perf: exclude large slices from IPC state sync to main process
+
+The store.subscribe handler sends the entire Redux state to the main
+process via IPC every 100ms. When messageBlocks contains large data
+(e.g. base64 images from tool responses), serializing and transferring
+this state blocks the main thread for 200-500ms per cycle — longer
+than the 100ms throttle interval — causing the UI to freeze
+continuously.
+
+Exclude `messages` and `messageBlocks` from the IPC payload. These
+slices are already blacklisted from Redux Persist and are never read
+by the main process (verified: ReduxService.selectSync/stateCache has
+no consumers that access message or block data). The main process only
+needs lightweight slices like settings, assistants, and llm configs.
