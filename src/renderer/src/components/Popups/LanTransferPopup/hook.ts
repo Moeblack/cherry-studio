@@ -1,5 +1,5 @@
 import { loggerService } from '@logger'
-import { getBackupData } from '@renderer/services/BackupService'
+import { streamBackupData } from '@renderer/services/BackupService'
 import type { LocalTransferPeer } from '@shared/config/types'
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -200,10 +200,10 @@ export function useLanTransfer(): UseLanTransferReturn {
           }
         }
 
-        // Step 1: Create temporary backup
+        // Step 1: Create temporary backup using streaming to avoid memory issues
         logger.info('Creating temporary backup for LAN transfer...')
-        const backupData = await getBackupData()
-        backupPath = await window.api.backup.createLanTransferBackup(backupData)
+        await streamBackupData(true)
+        backupPath = await window.api.backup.createLanTransferBackup('')
         dispatch({ type: 'SET_TEMP_BACKUP_PATH', payload: backupPath })
 
         // Extract filename from path

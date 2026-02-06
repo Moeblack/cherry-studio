@@ -207,7 +207,14 @@ const api = {
     createLanTransferBackup: (data: string): Promise<string> =>
       ipcRenderer.invoke(IpcChannel.Backup_CreateLanTransferBackup, data),
     deleteTempBackup: (filePath: string): Promise<boolean> =>
-      ipcRenderer.invoke(IpcChannel.Backup_DeleteTempBackup, filePath)
+      ipcRenderer.invoke(IpcChannel.Backup_DeleteTempBackup, filePath),
+    createDataWriter: (skipBackupFile: boolean): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Backup_CreateDataWriter, skipBackupFile),
+    writeDataChunk: (chunk: string): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Backup_WriteDataChunk, chunk),
+    closeDataWriter: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Backup_CloseDataWriter),
+    backupFromStream: (fileName: string, destinationPath?: string): Promise<string> =>
+      ipcRenderer.invoke(IpcChannel.Backup_BackupFromStream, fileName, destinationPath)
   },
   file: {
     select: (options?: OpenDialogOptions): Promise<FileMetadata[] | null> =>

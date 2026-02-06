@@ -7,7 +7,7 @@ import { NUTSTORE_HOST } from '@shared/config/nutstore'
 import dayjs from 'dayjs'
 import { type CreateDirectoryOptions } from 'webdav'
 
-import { getBackupData, handleData } from './BackupService'
+import { handleData, streamBackupData } from './BackupService'
 
 const logger = loggerService.withContext('NutstoreService')
 
@@ -143,15 +143,17 @@ export async function backupToNutstore({
 
   store.dispatch(setNutstoreSyncState({ syncing: true, lastSyncError: null }))
 
-  const backupData = await getBackupData()
   const skipBackupFile = store.getState().nutstore.nutstoreSkipBackupFile
   const maxBackups = store.getState().nutstore.nutstoreMaxBackups
+
+  // Stream backup data to main process first
+  await streamBackupData(skipBackupFile)
 
   try {
     // 先清理旧备份
     await cleanupOldBackups(config, maxBackups)
 
-    const isSuccess = await window.api.backup.backupToWebdav(backupData, {
+    const isSuccess = await window.api.backup.backupToWebdav('', {
       ...config,
       fileName: finalFileName,
       skipBackupFile: skipBackupFile
